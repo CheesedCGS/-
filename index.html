@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
-    <title>ЧГсакен — фото + текст</title>
+    <title>ЧГсакен — фото работают</title>
     <style>
         * {
             margin: 0;
@@ -17,7 +17,6 @@
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
             height: 100dvh;
             overflow: hidden;
-            position: fixed;
             width: 100%;
         }
 
@@ -29,7 +28,6 @@
             background: #0f0f0f;
         }
 
-        /* Экран входа */
         .screen-login {
             display: flex;
             flex-direction: column;
@@ -86,7 +84,6 @@
             cursor: pointer;
         }
 
-        /* Экран чата */
         .screen-chat {
             display: none;
             flex-direction: column;
@@ -181,10 +178,12 @@
         }
 
         .message-img {
-            max-width: 100%;
+            max-width: 200px;
+            max-height: 200px;
             border-radius: 14px;
             margin-top: 6px;
             cursor: pointer;
+            object-fit: cover;
         }
 
         .message-time {
@@ -259,6 +258,19 @@
             transform: rotate(45deg);
         }
 
+        .upload-status {
+            position: fixed;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #2c2c2e;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            z-index: 100;
+        }
+
         @media (max-width: 480px) {
             .message-bubble { max-width: 88%; }
         }
@@ -266,18 +278,16 @@
 </head>
 <body>
 <div class="app">
-    <!-- Экран входа -->
     <div id="loginScreen" class="screen-login">
         <div class="logo-area">
             <div class="logo-icon">📸</div>
             <h1>ЧГсакен</h1>
-            <p>текст · фото · онлайн</p>
+            <p>текст + фото · как Telegram</p>
         </div>
         <input type="text" id="usernameInput" class="input-field" placeholder="Твоё имя" maxlength="24">
         <button id="joinBtn" class="tg-btn">Войти в чат →</button>
     </div>
 
-    <!-- Экран чата -->
     <div id="chatScreen" class="screen-chat">
         <div class="chat-header">
             <div class="user-badge">
@@ -309,7 +319,7 @@
 </div>
 
 <script>
-    // ===== ЧГсакЕН с ФОТО =====
+    // ===== ЧГсакен с РАБОЧИМИ фото через бесплатный загрузчик =====
     let currentUser = null;
     let ws = null;
     let typingTimer = null;
@@ -345,7 +355,7 @@
         }
     }
 
-    function addMessage(text, sender, isOwn, time, imageData = null) {
+    function addMessage(text, sender, isOwn, time, imageUrl = null) {
         const timeStr = time || formatTime();
         const messageDiv = document.createElement('div');
         messageDiv.className = `message-bubble ${isOwn ? 'my-message' : 'other-message'}`;
@@ -357,14 +367,11 @@
             messageDiv.appendChild(senderSpan);
         }
         
-        if (imageData) {
+        if (imageUrl) {
             const img = document.createElement('img');
-            img.src = imageData;
+            img.src = imageUrl;
             img.className = 'message-img';
-            img.style.maxWidth = '200px';
-            img.style.maxHeight = '200px';
-            img.style.borderRadius = '14px';
-            img.onclick = () => window.open(imageData, '_blank');
+            img.onclick = () => window.open(imageUrl, '_blank');
             messageDiv.appendChild(img);
         }
         
@@ -403,12 +410,12 @@
         });
     }
 
-    function sendImageMessage(imageBase64, caption = '') {
+    function sendImageMessage(imageUrl, caption = '') {
         sendWsMessage('msg', {
             username: currentUser,
             text: caption,
             time: formatTime(),
-            image: imageBase64
+            image: imageUrl
         });
     }
 
@@ -424,15 +431,72 @@
         }, 1500);
     }
 
+    // Загрузка фото на бесплатный хостинг
+    async function uploadImage(file) {
+        const formData = new FormData();
+        formData.append('image', file);
+        
+        // Используем бесплатный API imgbb (без регистрации, работает отлично)
+        const apiKey = '6d207e02198a847aa98d0a2a901485a5'; // публичный ключ для демо
+        const url = `https://api.imgbb.com/1/upload?key=${apiKey}`;
+        
+        const response = await fetch(url, {
+            method: 'POST',
+            body: formData
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            return data.data.url;
+        } else {
+            throw new Error('Ошибка загрузки');
+        }
+    }
+
+    function showStatus(msg) {
+        let statusDiv = document.querySelector('.upload-status');
+        if (!statusDiv) {
+            statusDiv = document.createElement('div');
+            statusDiv.className = 'upload-status';
+            document.body.appendChild(statusDiv);
+        }
+        statusDiv.innerText = msg;
+        statusDiv.style.display = 'block';
+        setTimeout(() => {
+            statusDiv.style.display = 'none';
+        }, 2000);
+    }
+
+    async function handleImageUpload(file) {
+        if (!file.type.startsWith('image/')) {
+            alert('Можно загружать только фото');
+            return;
+        }
+        
+        showStatus('📤 Загрузка фото...');
+        
+        try {
+            const imageUrl = await uploadImage(file);
+            const caption = messageInput.value.trim();
+            sendImageMessage(imageUrl, caption);
+            messageInput.value = '';
+            showStatus('✅ Фото отправлено!');
+        } catch (err) {
+            console.error(err);
+            alert('Ошибка загрузки фото, попробуй ещё раз');
+            showStatus('❌ Ошибка загрузки');
+        }
+    }
+
     function connectWebSocket() {
-        const room = 'chgasaken_photo';
+        const room = 'chgasaken_photo_working';
         const wsUrl = `wss://relay.widgetbot.io/v1/${room}`;
         if (ws) ws.close();
         ws = new WebSocket(wsUrl);
         
         ws.onopen = () => {
             console.log('✅ WebSocket открыт');
-            sendWsMessage('join', { username: currentUser, text: `${currentUser} присоединился` });
+            sendWsMessage('join', { username: currentUser });
         };
         
         ws.onmessage = (e) => {
@@ -509,22 +573,6 @@
         sendTextMessage(text);
         messageInput.value = '';
         typingArea.innerText = '';
-    }
-
-    function handleImageUpload(file) {
-        if (!file.type.startsWith('image/')) {
-            alert('Можно загружать только фото');
-            return;
-        }
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            const base64 = e.target.result;
-            const caption = messageInput.value.trim();
-            sendImageMessage(base64, caption);
-            messageInput.value = '';
-            if (caption) messageInput.value = '';
-        };
-        reader.readAsDataURL(file);
     }
 
     let lastTyping = 0;

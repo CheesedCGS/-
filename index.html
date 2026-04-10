@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
-    <title>ЧГсакен — фото работают</title>
+    <title>ЧГсакен — рабочий чат с фото</title>
     <style>
         * {
             margin: 0;
@@ -200,13 +200,6 @@
             margin: 8px auto;
         }
 
-        .typing-indicator {
-            padding: 6px 16px 8px;
-            font-size: 12px;
-            color: #6c6c70;
-            background: #000;
-        }
-
         .input-panel {
             background: #0f0f0f;
             padding: 10px 12px 14px;
@@ -258,7 +251,7 @@
             transform: rotate(45deg);
         }
 
-        .upload-status {
+        .status-toast {
             position: fixed;
             bottom: 80px;
             left: 50%;
@@ -269,12 +262,15 @@
             border-radius: 20px;
             font-size: 12px;
             z-index: 100;
+            display: none;
         }
 
         @media (max-width: 480px) {
             .message-bubble { max-width: 88%; }
         }
     </style>
+    <!-- PeerJS для P2P соединения между пользователями -->
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
 </head>
 <body>
 <div class="app">
@@ -282,10 +278,11 @@
         <div class="logo-area">
             <div class="logo-icon">📸</div>
             <h1>ЧГсакен</h1>
-            <p>текст + фото · как Telegram</p>
+            <p>текст + фото · P2P чат</p>
         </div>
         <input type="text" id="usernameInput" class="input-field" placeholder="Твоё имя" maxlength="24">
         <button id="joinBtn" class="tg-btn">Войти в чат →</button>
+        <div style="font-size: 11px; color: #636366; margin-top: 16px;">⚡ peer-to-peer, фото работают</div>
     </div>
 
     <div id="chatScreen" class="screen-chat">
@@ -294,7 +291,7 @@
                 <div class="avatar" id="avatar">😎</div>
                 <div class="user-info">
                     <div class="name" id="chatUserName">ЧГсакен</div>
-                    <div class="status">⚡ онлайн</div>
+                    <div class="status" id="connectionStatus">🔗 подключение...</div>
                 </div>
             </div>
             <button id="logoutBtn" class="logout-icon">🚪</button>
@@ -303,8 +300,6 @@
         <div id="messagesContainer" class="messages-list">
             <div class="system-message">✨ Отправляй текст или фото ✨</div>
         </div>
-
-        <div id="typingArea" class="typing-indicator"></div>
 
         <div class="input-panel">
             <label class="attach-btn" id="attachBtn">📎
@@ -316,15 +311,17 @@
             </div>
         </div>
     </div>
+    <div id="statusToast" class="status-toast"></div>
 </div>
 
 <script>
-    // ===== ЧГсакен с РАБОЧИМИ фото через бесплатный загрузчик =====
+    // ===== ЧГсакен на PeerJS (работает везде, без сервера) =====
     let currentUser = null;
-    let ws = null;
-    let typingTimer = null;
-    let reconnectTimer = null;
-
+    let peer = null;
+    let connections = []; // все подключения
+    let myPeerId = null;
+    
+    // DOM элементы
     const loginScreen = document.getElementById('loginScreen');
     const chatScreen = document.getElementById('chatScreen');
     const usernameInput = document.getElementById('usernameInput');
@@ -335,9 +332,18 @@
     const sendBtn = document.getElementById('sendBtn');
     const chatUserNameSpan = document.getElementById('chatUserName');
     const avatarSpan = document.getElementById('avatar');
-    const typingArea = document.getElementById('typingArea');
+    const connectionStatusSpan = document.getElementById('connectionStatus');
     const fileInput = document.getElementById('fileInput');
     const attachBtn = document.getElementById('attachBtn');
+    const statusToast = document.getElementById('statusToast');
+
+    function showToast(msg, duration = 2000) {
+        statusToast.innerText = msg;
+        statusToast.style.display = 'block';
+        setTimeout(() => {
+            statusToast.style.display = 'none';
+        }, duration);
+    }
 
     function formatTime() {
         return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -395,76 +401,48 @@
         }
     }
 
-    function sendWsMessage(type, payload) {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type, ...payload }));
+    // Отправка всем подключённым
+    function broadcast(data) {
+        connections.forEach(conn => {
+            if (conn.open) {
+                conn.send(data);
+            }
+        });
+    }
+
+    // Отправка сообщения
+    function sendChatMessage(text, imageUrl = null) {
+        const messageData = {
+            type: 'message',
+            username: currentUser,
+            text: text || '',
+            image: imageUrl,
+            time: formatTime()
+        };
+        // Показать у себя
+        if (imageUrl) {
+            addMessage(text || '', currentUser, true, formatTime(), imageUrl);
+        } else {
+            addMessage(text, currentUser, true, formatTime());
         }
+        // Отправить другим
+        broadcast(messageData);
     }
 
-    function sendTextMessage(text) {
-        sendWsMessage('msg', {
-            username: currentUser,
-            text: text,
-            time: formatTime(),
-            image: null
-        });
-    }
-
-    function sendImageMessage(imageUrl, caption = '') {
-        sendWsMessage('msg', {
-            username: currentUser,
-            text: caption,
-            time: formatTime(),
-            image: imageUrl
-        });
-    }
-
-    function sendTyping() {
-        sendWsMessage('typing', { username: currentUser });
-    }
-
-    function showTyping(name) {
-        typingArea.innerText = `${name} печатает...`;
-        if (typingTimer) clearTimeout(typingTimer);
-        typingTimer = setTimeout(() => {
-            typingArea.innerText = '';
-        }, 1500);
-    }
-
-    // Загрузка фото на бесплатный хостинг
+    // Загрузка фото на imgbb
     async function uploadImage(file) {
         const formData = new FormData();
         formData.append('image', file);
-        
-        // Используем бесплатный API imgbb (без регистрации, работает отлично)
-        const apiKey = '6d207e02198a847aa98d0a2a901485a5'; // публичный ключ для демо
+        const apiKey = '6d207e02198a847aa98d0a2a901485a5';
         const url = `https://api.imgbb.com/1/upload?key=${apiKey}`;
         
-        const response = await fetch(url, {
-            method: 'POST',
-            body: formData
-        });
-        
+        const response = await fetch(url, { method: 'POST', body: formData });
         const data = await response.json();
         if (data.success) {
             return data.data.url;
         } else {
-            throw new Error('Ошибка загрузки');
+            throw new Error('Upload failed');
         }
-    }
-
-    function showStatus(msg) {
-        let statusDiv = document.querySelector('.upload-status');
-        if (!statusDiv) {
-            statusDiv = document.createElement('div');
-            statusDiv.className = 'upload-status';
-            document.body.appendChild(statusDiv);
-        }
-        statusDiv.innerText = msg;
-        statusDiv.style.display = 'block';
-        setTimeout(() => {
-            statusDiv.style.display = 'none';
-        }, 2000);
     }
 
     async function handleImageUpload(file) {
@@ -472,60 +450,117 @@
             alert('Можно загружать только фото');
             return;
         }
-        
-        showStatus('📤 Загрузка фото...');
-        
+        showToast('📤 Загрузка фото...');
         try {
             const imageUrl = await uploadImage(file);
             const caption = messageInput.value.trim();
-            sendImageMessage(imageUrl, caption);
+            sendChatMessage(caption, imageUrl);
             messageInput.value = '';
-            showStatus('✅ Фото отправлено!');
+            showToast('✅ Фото отправлено!');
         } catch (err) {
             console.error(err);
-            alert('Ошибка загрузки фото, попробуй ещё раз');
-            showStatus('❌ Ошибка загрузки');
+            alert('Ошибка загрузки фото');
+            showToast('❌ Ошибка');
         }
     }
 
-    function connectWebSocket() {
-        const room = 'chgasaken_photo_working';
-        const wsUrl = `wss://relay.widgetbot.io/v1/${room}`;
-        if (ws) ws.close();
-        ws = new WebSocket(wsUrl);
+    // Инициализация PeerJS
+    function initPeer() {
+        peer = new Peer();
         
-        ws.onopen = () => {
-            console.log('✅ WebSocket открыт');
-            sendWsMessage('join', { username: currentUser });
-        };
+        peer.on('open', (id) => {
+            myPeerId = id;
+            console.log('Мой Peer ID:', id);
+            connectionStatusSpan.innerText = '🟢 онлайн';
+            showToast('✅ Чат готов! Дай друзьям ссылку');
+            
+            // Сохраняем ID в localStorage для авто-подключения
+            localStorage.setItem('chg_peerId', id);
+            localStorage.setItem('chg_username', currentUser);
+            
+            // Пытаемся подключиться к сохранённым пирам
+            connectToSavedPeers();
+        });
         
-        ws.onmessage = (e) => {
-            try {
-                const data = JSON.parse(e.data);
-                if (data.type === 'msg') {
-                    const isOwn = data.username === currentUser;
-                    if (data.image) {
-                        addMessage(data.text || '', data.username, isOwn, data.time, data.image);
-                    } else {
-                        addMessage(data.text, data.username, isOwn, data.time);
-                    }
-                } else if (data.type === 'join') {
-                    if (data.username !== currentUser) addSystemMessage(`✨ ${data.username} присоединился`);
-                } else if (data.type === 'typing') {
-                    if (data.username !== currentUser) showTyping(data.username);
-                } else if (data.type === 'leave') {
-                    if (data.username !== currentUser) addSystemMessage(`◌ ${data.username} покинул чат`);
-                }
-            } catch(err) {}
-        };
+        peer.on('connection', (conn) => {
+            setupConnection(conn);
+        });
         
-        ws.onclose = () => {
-            if (currentUser) {
-                reconnectTimer = setTimeout(() => connectWebSocket(), 2000);
-            }
-        };
+        peer.on('error', (err) => {
+            console.error('Peer error:', err);
+            connectionStatusSpan.innerText = '⚠️ ошибка';
+        });
     }
-
+    
+    function setupConnection(conn) {
+        connections.push(conn);
+        
+        conn.on('open', () => {
+            console.log('Подключен к:', conn.peer);
+            // Отправить приветствие
+            conn.send({
+                type: 'join',
+                username: currentUser,
+                text: `${currentUser} присоединился`
+            });
+        });
+        
+        conn.on('data', (data) => {
+            if (data.type === 'message') {
+                const isOwn = data.username === currentUser;
+                if (data.image) {
+                    addMessage(data.text || '', data.username, isOwn, data.time, data.image);
+                } else {
+                    addMessage(data.text, data.username, isOwn, data.time);
+                }
+            } else if (data.type === 'join') {
+                if (data.username !== currentUser) {
+                    addSystemMessage(`✨ ${data.username} присоединился`);
+                }
+            }
+        });
+        
+        conn.on('close', () => {
+            const index = connections.indexOf(conn);
+            if (index > -1) connections.splice(index, 1);
+        });
+    }
+    
+    function connectToPeer(peerId) {
+        if (peerId === myPeerId) return;
+        // Проверяем, уже подключены
+        if (connections.some(c => c.peer === peerId)) return;
+        
+        const conn = peer.connect(peerId);
+        setupConnection(conn);
+    }
+    
+    function connectToSavedPeers() {
+        // В реальном P2P нужно знать ID других пользователей
+        // Для простоты сделаем комнату через localStorage (для одной вкладки)
+        // Но между разными людьми нужно обмениваться ссылками
+        // Добавим кнопку копирования ссылки
+    }
+    
+    // Поделиться ссылкой-приглашением
+    function shareInvite() {
+        const inviteUrl = `${window.location.href}?invite=${myPeerId}`;
+        navigator.clipboard.writeText(inviteUrl);
+        showToast('🔗 Ссылка-приглашение скопирована! Отправь другу');
+    }
+    
+    // Проверка URL на приглашение
+    function checkInvite() {
+        const params = new URLSearchParams(window.location.search);
+        const inviteId = params.get('invite');
+        if (inviteId && myPeerId && inviteId !== myPeerId) {
+            setTimeout(() => {
+                connectToPeer(inviteId);
+                showToast('🔌 Подключение к пригласившему...');
+            }, 1000);
+        }
+    }
+    
     function enterChat() {
         const name = usernameInput.value.trim();
         if (!name) {
@@ -541,56 +576,59 @@
         avatarSpan.innerText = currentUser[0].toUpperCase();
         
         messagesContainer.innerHTML = '<div class="system-message">✨ Добро пожаловать в ЧГсакен ✨</div>';
-        typingArea.innerText = '';
-        
-        connectWebSocket();
         
         loginScreen.style.display = 'none';
         chatScreen.style.display = 'flex';
-        setTimeout(() => messageInput.focus(), 100);
-    }
-
-    function logout() {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            sendWsMessage('leave', { username: currentUser });
-            ws.close();
+        
+        initPeer();
+        
+        // Добавляем кнопку приглашения в шапку
+        const headerDiv = document.querySelector('.chat-header');
+        if (!document.getElementById('inviteBtn')) {
+            const inviteBtn = document.createElement('button');
+            inviteBtn.id = 'inviteBtn';
+            inviteBtn.innerText = '➕';
+            inviteBtn.style.background = '#2c2c2e';
+            inviteBtn.style.border = 'none';
+            inviteBtn.style.color = 'white';
+            inviteBtn.style.fontSize = '18px';
+            inviteBtn.style.width = '36px';
+            inviteBtn.style.height = '36px';
+            inviteBtn.style.borderRadius = '36px';
+            inviteBtn.style.cursor = 'pointer';
+            inviteBtn.onclick = shareInvite;
+            headerDiv.appendChild(inviteBtn);
         }
+        
+        setTimeout(() => {
+            checkInvite();
+        }, 1500);
+    }
+    
+    function logout() {
+        if (peer) peer.destroy();
+        connections = [];
         currentUser = null;
-        if (reconnectTimer) clearTimeout(reconnectTimer);
         loginScreen.style.display = 'flex';
         chatScreen.style.display = 'none';
         messageInput.value = '';
         messagesContainer.innerHTML = '<div class="system-message">✨ Добро пожаловать в ЧГсакен ✨</div>';
+        localStorage.removeItem('chg_peerId');
+        localStorage.removeItem('chg_username');
     }
-
+    
     function handleSendMessage() {
         const text = messageInput.value.trim();
         if (!text) return;
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-            alert('Соединение... подожди секунду');
-            return;
-        }
-        sendTextMessage(text);
+        sendChatMessage(text);
         messageInput.value = '';
-        typingArea.innerText = '';
     }
-
-    let lastTyping = 0;
-    function onTyping() {
-        if (!currentUser) return;
-        const now = Date.now();
-        if (now - lastTyping > 1500) {
-            lastTyping = now;
-            sendTyping();
-        }
-    }
-
+    
     // События
     joinBtn.onclick = enterChat;
     logoutBtn.onclick = logout;
     sendBtn.onclick = handleSendMessage;
     messageInput.onkeypress = (e) => { if (e.key === 'Enter') handleSendMessage(); };
-    messageInput.oninput = onTyping;
     
     attachBtn.onclick = () => fileInput.click();
     fileInput.onchange = (e) => {
